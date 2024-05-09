@@ -197,7 +197,8 @@ class AtomDisplay:
     glMatrixMode(GL_MODELVIEW)
   def _register_callbacks(self):
     glutTimerFunc(UPDATE_INTERVAL, self._get_timer_func(), 0)
-    glutMouseFunc(self._get_mouse_click())
+    glutMouseFunc(self._get_mouse_click_func())
+    glutKeyboardFunc(self._get_keyboard_func())
   def _get_timer_func(self):
     def timer_func(value):
       self._pop_events()
@@ -214,7 +215,29 @@ class AtomDisplay:
       glutSwapBuffers()
       glPopMatrix()
     return display
-  def _get_mouse_click(self):
+  def _get_keyboard_func(self):
+    active_keys = "exwsdaio"
+    key_axes = [0, 0, 1, 1, 2, 2, 0, 0]
+    key_signs = [1, -1, 1, -1, 1, -1, 0, 0]
+    zoom_factors = [1.]*6 + [0.9, 1/0.9]
+    def keyboard(keycode, x, y):
+      key = active_keys.find(chr(ord(keycode)))
+      if key != -1:
+        eye, center, up = self._camera
+        forward = center - eye
+        right = np.cross(forward, up)
+        forward_mag = np.linalg.norm(forward)
+        unit_directions = [forward/forward_mag,
+          up/np.linalg.norm(up),
+          right/np.linalg.norm(right)]
+        scale = forward_mag/10
+        center += scale*unit_directions[key_axes[key]]*key_signs[key]
+        forward *= zoom_factors[key]
+        eye = center - forward
+        self._camera = eye, center, up
+        self._redisplay()
+    return keyboard
+  def _get_mouse_click_func(self):
     def mouse_click(btn, state, x, y):
       if state == GLUT_DOWN:
         if btn == GLUT_LEFT_BUTTON:
