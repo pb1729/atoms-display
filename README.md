@@ -20,5 +20,10 @@ Clone the repo and run: `pip install .`
 If you want to make changes to the package: `pip install -e .`
 
 
-
+## ACKNOWLEDGEMENTS:
+* We thank Rick Muller for the following recipe for using OpenGL in python:
+    -> https://code.activestate.com/recipes/325391-open-a-glut-window-and-draw-a-sphere-using-pythono/
+* We thank the authors of the Mogli project for their work:
+    -> https://github.com/sciapp/mogli
+Code in this project is partially derived from these programs.
 
