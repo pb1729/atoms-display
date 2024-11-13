@@ -1,5 +1,6 @@
 from threading import Thread
 from queue import Queue
+import time
 
 import numpy as np
 
@@ -30,7 +31,7 @@ WIDTH = 600
 HEIGHT = 600
 LIGHT_BRIGHTNESS = 1.0
 CAM_STEP_BACK_DIST = 100.
-UPDATE_INTERVAL = 50 # [ms]
+UPDATE_INTERVAL = 0.01 # [s]
 
 MISSING_GLUT_ERRMSG = """ Null Function Exception:
 Could not find the function glutInit(). This error is usually caused by not having Freeglut
@@ -165,6 +166,7 @@ class AtomDisplay:
     self._camera = np.array([0., 0., CAM_STEP_BACK_DIST]), np.array([0., 0., 0.]), np.array([0., 1., 0.])
     self._window_id = None
     self._events = Queue()
+    self._active = True
   def _get_colors(self, atomic_numbers):
     return ATOM_COLORS[atomic_numbers]
   def _get_radii(self, atomic_numbers):
@@ -177,6 +179,7 @@ class AtomDisplay:
       raise RuntimeError(MISSING_GLUT_ERRMSG) from e
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)
     glutInitWindowSize(WIDTH, HEIGHT)
+    glutSetOption(GLUT_ACTION_ON_WINDOW_CLOSE, GLUT_ACTION_CONTINUE_EXECUTION) # allow user to close display without ending program
     self._window_id = glutCreateWindow(WINDOWNAME)
   def _setup_graphics(self):
     glClearColor(0.,0.,0.,1.)
@@ -196,14 +199,9 @@ class AtomDisplay:
     gluPerspective(40., 1., 1., 4*CAM_STEP_BACK_DIST)
     glMatrixMode(GL_MODELVIEW)
   def _register_callbacks(self):
-    glutTimerFunc(UPDATE_INTERVAL, self._get_timer_func(), 0)
     glutMouseFunc(self._get_mouse_click_func())
     glutKeyboardFunc(self._get_keyboard_func())
-  def _get_timer_func(self):
-    def timer_func(value):
-      self._pop_events()
-      glutTimerFunc(UPDATE_INTERVAL, timer_func, 0) # recursive callback
-    return timer_func
+    glutCloseFunc(self._get_cleanup())
   def _get_display(self):
     def display():
       glutSetWindow(self._window_id)
@@ -247,6 +245,12 @@ class AtomDisplay:
           self._drag_rotate(*self._previous_mouse_position, x, y)
           self._redisplay()
     return mouse_click
+  def _get_cleanup(self):
+    def cleanup():
+      self._active = False
+      glutSetWindow(self._window_id)
+      glutHideWindow()
+    return cleanup
   def _drag_rotate(self, x0, y0, x1, y1):
     dx = x1 - x0
     dy = y1 - y0
@@ -289,10 +293,16 @@ class AtomDisplay:
     self._register_callbacks()
     # main loop:
     glutDisplayFunc(self._get_display())
-    glutMainLoop()
+    i = 0
+    while self._active:
+      glutMainLoopEvent()
+      self._pop_events()
+      time.sleep(UPDATE_INTERVAL)
   def update_pos(self, newpos):
+    assert self._active, "window has already been closed!"
     self._events.put((self.EVENT_UPDATE_POS, np.copy(newpos)))
   def center_pos(self):
+    assert self._active, "window has already been closed!"
     self._events.put((self.EVENT_CENTER_POS, None))
 
 
@@ -329,7 +339,3 @@ if __name__ == "__main__":
   from sys import argv
   atomic_numbers, positions = read_xyz(argv[1])
   launch_atom_display(atomic_numbers, positions)
-
-
-
-
