@@ -270,6 +270,7 @@ class AtomDisplay:
     glutSetWindow(self._window_id)
     glutPostRedisplay()
   def _pop_events(self):
+    if not self._active: return
     while not self._events.empty():
       event_type, event_data = self._events.get()
       if   event_type == self.EVENT_UPDATE_POS: self._do_update_pos(event_data)
@@ -339,3 +340,4 @@ if __name__ == "__main__":
   from sys import argv
   atomic_numbers, positions = read_xyz(argv[1])
   launch_atom_display(atomic_numbers, positions)
+
