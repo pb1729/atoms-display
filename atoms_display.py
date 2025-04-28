@@ -158,6 +158,7 @@ class AtomDisplay:
   """ A class representing a window displaying a molecule! """
   EVENT_UPDATE_POS = 1
   EVENT_CENTER_POS = 2
+  EVENT_READ_SCREEN = 3
   def __init__(self, atomic_numbers, positions, radii_scale=1.0):
     self._positions = np.copy(positions)
     self._radii = radii_scale*self._get_radii(atomic_numbers)
@@ -166,6 +167,7 @@ class AtomDisplay:
     self._camera = np.array([0., 0., CAM_STEP_BACK_DIST]), np.array([0., 0., 0.]), np.array([0., 1., 0.])
     self._window_id = None
     self._events = Queue()
+    self._answers = Queue()
     self._active = True
   def _get_colors(self, atomic_numbers):
     return ATOM_COLORS[atomic_numbers]
@@ -275,6 +277,7 @@ class AtomDisplay:
       event_type, event_data = self._events.get()
       if   event_type == self.EVENT_UPDATE_POS: self._do_update_pos(event_data)
       elif event_type == self.EVENT_CENTER_POS: self._do_center_pos(event_data)
+      elif event_type == self.EVENT_READ_SCREEN: self._do_read_screen(event_data)
       else: assert False
   def _do_center_pos(self, _):
     eye, center, up = self._camera
@@ -286,6 +289,9 @@ class AtomDisplay:
   def _do_update_pos(self, newpos):
     self._positions = newpos
     self._redisplay()
+  def _do_read_screen(self, _):
+    ans = glReadPixels(0, 0, WIDTH, HEIGHT, GL_RGB, GL_UNSIGNED_BYTE)
+    self._answers.put(ans)
   def launch(self):
     self._make_window()
     self._setup_graphics()
@@ -305,6 +311,11 @@ class AtomDisplay:
   def center_pos(self):
     assert self._active, "window has already been closed!"
     self._events.put((self.EVENT_CENTER_POS, None))
+  def get_current_screen(self):
+    assert self._active, "window has already been closed!"
+    self._events.put((self.EVENT_READ_SCREEN, None))
+    ans = self._answers.get()
+    return np.frombuffer(ans, dtype=np.uint8).reshape(HEIGHT, WIDTH, 3)
 
 
 
@@ -339,5 +350,4 @@ def launch_atom_display(atomic_numbers, positions, **kwargs):
 if __name__ == "__main__":
   from sys import argv
   atomic_numbers, positions = read_xyz(argv[1])
-  launch_atom_display(atomic_numbers, positions)
-
+  display = launch_atom_display(atomic_numbers, positions)
