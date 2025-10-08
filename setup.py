@@ -3,7 +3,7 @@ from setuptools import setup
 setup(
   name="atoms_display",
   py_modules=["atoms_display"],
-  install_requires=["numpy", "pyopengl", "PyOpenGL_accelerate"],
+  install_requires=["numpy", "pyopengl", "PyOpenGL_accelerate", "glfw"],
   # pyopengl lives here: https://github.com/mcfletch/pyopengl
   # Metadata:
   version="0.5",

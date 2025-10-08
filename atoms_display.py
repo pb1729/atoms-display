@@ -1,43 +1,14 @@
-from threading import Thread
+import ctypes
 from queue import Queue
-import time
 
 import numpy as np
-
-from OpenGL.GLUT import *
-from OpenGL.GLU import *
 from OpenGL.GL import *
 
-
-"""
-      ATOMS DISPLAY
-
-Very simple and bare-bones code for displaying molecules. Key distinguishing feature is that molecules
-can have their configurations updated in approximately real time, and the display will be correspondingly
-animated.
-
-ACKNOWLEDGEMENTS:
-* We thank Rick Muller for the following recipe for using OpenGL in python:
-    -> https://code.activestate.com/recipes/325391-open-a-glut-window-and-draw-a-sphere-using-pythono/
-* We thank the authors of the Mogli project for their work:
-    -> https://github.com/sciapp/mogli
-Code in this file is partially derived from these programs.
-"""
+from display import Display, launch_display_thread
+from utils import must_be
 
 
-# Constants:
-WINDOWNAME = "atoms display"
-WIDTH = 600
-HEIGHT = 600
-LIGHT_BRIGHTNESS = 1.0
-CAM_STEP_BACK_DIST = 100.
-UPDATE_INTERVAL = 0.01 # [s]
-
-MISSING_GLUT_ERRMSG = """ Null Function Exception:
-Could not find the function glutInit(). This error is usually caused by not having Freeglut
-installed. To obtain this software, go to their website: https://freeglut.sourceforge.net/
-Or on Ubuntu you can run: sudo apt-get install freeglut3-dev
-"""
+# ------------------ Element Parameters ------------------
 
 # Atom color rgb tuples (used for rendering, may be changed by users)
 ATOM_COLORS = np.array([(0, 0, 0),  # No element 0
@@ -81,6 +52,7 @@ ATOM_COLORS = np.array([(0, 0, 0),  # No element 0
                         (255, 0, 255), (255, 0, 255), (255, 0, 255),
                         (255, 0, 255), (255, 0, 255), (255, 0, 255),
                         (255, 0, 255)], dtype=np.float32)/255.0
+
 # Atomic numbers mapped to their symbols
 ATOMIC_NUMBERS = {"H": 1, "HE": 2, "LI": 3, "BE": 4, "B": 5, "C": 6, "N": 7,
                 "O": 8, "F": 9, "NE": 10, "NA": 11, "MG": 12, "AL": 13,
@@ -125,199 +97,227 @@ ATOM_VALENCE_RADII = np.array([0,  # No element 0
 ATOM_VALENCE_RADII.flags.writeable = False
 
 
-def look_at(eye, center, up):
-  gluLookAt(*eye, *center, *up)
 
-def draw_sphere(rad, pos, color):
-  glPushMatrix()
-  glTranslated(*pos)
-  glMaterialfv(GL_FRONT,GL_DIFFUSE,color)
-  glutSolidSphere(rad, 9, 6)
-  glPopMatrix()
+# ------------------ Mesh Construction Code ------------------
 
-def create_rotation_matrix(angle, x, y, z):
-    """ Creates a 3x3 rotation matrix. """
-    if np.linalg.norm((x, y, z)) < 0.0001:
-        return np.eye(3, dtype=np.float32)
-    x, y, z = np.array((x, y, z))/np.linalg.norm((x, y, z))
-    matrix = np.zeros((3, 3), dtype=np.float32)
-    cos = np.cos(angle)
-    sin = np.sin(angle)
-    matrix[0, 0] = x*x*(1-cos)+cos
-    matrix[1, 0] = x*y*(1-cos)+sin*z
-    matrix[0, 1] = x*y*(1-cos)-sin*z
-    matrix[2, 0] = x*z*(1-cos)-sin*y
-    matrix[0, 2] = x*z*(1-cos)+sin*y
-    matrix[1, 1] = y*y*(1-cos)+cos
-    matrix[1, 2] = y*z*(1-cos)-sin*x
-    matrix[2, 1] = y*z*(1-cos)+sin*x
-    matrix[2, 2] = z*z*(1-cos)+cos
-    return matrix
+def make_icosphere(subdivisions: int = 2) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Generate a unit icosphere mesh with smooth normals.
 
-class AtomDisplay:
-  """ A class representing a window displaying a molecule! """
-  EVENT_UPDATE_POS = 1
-  EVENT_CENTER_POS = 2
-  EVENT_READ_SCREEN = 3
-  def __init__(self, atomic_numbers, positions, radii_scale=1.0):
-    self._positions = np.copy(positions)
-    self._radii = radii_scale*self._get_radii(atomic_numbers)
-    self._colors = self._get_colors(atomic_numbers)
-    self._previous_mouse_position = None
-    self._camera = np.array([0., 0., CAM_STEP_BACK_DIST]), np.array([0., 0., 0.]), np.array([0., 1., 0.])
-    self._window_id = None
-    self._events = Queue()
-    self._answers = Queue()
-    self._active = True
-  def _get_colors(self, atomic_numbers):
-    return ATOM_COLORS[atomic_numbers]
-  def _get_radii(self, atomic_numbers):
-    return ATOM_VALENCE_RADII[atomic_numbers]
-  def _make_window(self):
-    assert self._window_id is None
-    try:
-      glutInit("dummy_script_name")
-    except OpenGL.error.NullFunctionError as e:
-      raise RuntimeError(MISSING_GLUT_ERRMSG) from e
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH)
-    glutInitWindowSize(WIDTH, HEIGHT)
-    glutSetOption(GLUT_ACTION_ON_WINDOW_CLOSE, GLUT_ACTION_CONTINUE_EXECUTION) # allow user to close display without ending program
-    self._window_id = glutCreateWindow(WINDOWNAME)
-  def _setup_graphics(self):
-    glClearColor(0.,0.,0.,1.)
-    glShadeModel(GL_SMOOTH)
-    glEnable(GL_CULL_FACE)
-    glEnable(GL_DEPTH_TEST)
+    Returns:
+        pos : (N, 3) float32 array of vertex positions (on the unit sphere)
+        nrm : (N, 3) float32 array of vertex normals (== positions, normalized)
+        idx : (M,)   uint32 array of triangle indices (triplets)
+
+    Notes:
+        - Keep 'subdivisions' small (e.g., 0..4). Each step quadruples triangle count.
+        - Positions are unit-length; use uniform instance scaling for radius.
+    """
+    # Golden ratio and base icosahedron (unit sphere after normalization)
+    t = (1.0 + 5.0 ** 0.5) / 2.0
+
+    base_vertices = np.array([
+        [-1,  t,  0],
+        [ 1,  t,  0],
+        [-1, -t,  0],
+        [ 1, -t,  0],
+
+        [ 0, -1,  t],
+        [ 0,  1,  t],
+        [ 0, -1, -t],
+        [ 0,  1, -t],
+
+        [ t,  0, -1],
+        [ t,  0,  1],
+        [-t,  0, -1],
+        [-t,  0,  1],
+    ], dtype=np.float64)
+
+    # Normalize to unit sphere
+    base_vertices /= np.linalg.norm(base_vertices, axis=1, keepdims=True)
+
+    base_faces = [
+        (0, 11, 5),  (0, 5, 1),   (0, 1, 7),   (0, 7, 10),  (0, 10, 11),
+        (1, 5, 9),   (5, 11, 4),  (11, 10, 2), (10, 7, 6),  (7, 1, 8),
+        (3, 9, 4),   (3, 4, 2),   (3, 2, 6),   (3, 6, 8),   (3, 8, 9),
+        (4, 9, 5),   (2, 4, 11),  (6, 2, 10),  (8, 6, 7),   (9, 8, 1),
+    ]
+
+    verts = base_vertices.tolist()
+    faces = [tuple(face) for face in base_faces]
+
+    # Cache for midpoints to avoid duplicating vertices
+    midpoint_cache: dict[tuple[int, int], int] = {}
+
+    def midpoint(i: int, j: int) -> int:
+        key = (i, j) if i < j else (j, i)
+        if key in midpoint_cache:
+            return midpoint_cache[key]
+        vi = np.array(verts[i], dtype=np.float64)
+        vj = np.array(verts[j], dtype=np.float64)
+        vm = vi + vj
+        vm /= np.linalg.norm(vm)  # project back to unit sphere
+        idx = len(verts)
+        verts.append(vm.tolist())
+        midpoint_cache[key] = idx
+        return idx
+
+    # Subdivide
+    for _ in range(subdivisions):
+        new_faces = []
+        midpoint_cache.clear()
+        for a, b, c in faces:
+            ab = midpoint(a, b)
+            bc = midpoint(b, c)
+            ca = midpoint(c, a)
+            # 4 new faces, preserving CCW winding on a sphere
+            new_faces.extend([
+                (a,  ab, ca),
+                (b,  bc, ab),
+                (c,  ca, bc),
+                (ab, bc, ca),
+            ])
+        faces = new_faces
+
+    pos = np.asarray(verts, dtype=np.float32)
+    # Smooth normals = normalized positions
+    nrm = pos / np.linalg.norm(pos, axis=1, keepdims=True)
+    idx = np.asarray([i for tri in faces for i in tri], dtype=np.uint32)
+
+    return pos, nrm, idx
+
+
+def create_mesh(sphere_verts, sphere_norms, sphere_indxs, atomic_numbers, positions):
+  nv,          must_be[3] = sphere_verts.shape
+  must_be[nv], must_be[3] = sphere_norms.shape
+  nidx, = sphere_indxs.shape
+  natom, = atomic_numbers.shape
+  must_be[natom], must_be[3] = positions.shape
+  ans_verts = sphere_verts[None, :, :]*ATOM_VALENCE_RADII[atomic_numbers][:, None, None] + positions[:, None, :]
+  ans_norms = sphere_norms[None, :, :] + np.zeros((natom, nv, 3))
+  ans_indxs = sphere_indxs[None, :] + (np.arange(natom)*nv)[:, None]
+  ans_cols = (ATOM_COLORS[atomic_numbers])[:, None, :] + np.zeros((natom, nv, 3))
+  return ans_verts.reshape(natom*nv, 3), ans_norms.reshape(natom*nv, 3), ans_indxs.reshape(natom*nidx), ans_cols.reshape(natom*nv, 3)
+
+def update_mesh(sphere_verts, output_verts, atomic_numbers, positions):
+  """ MUTATES output_verts """
+  nv, must_be[3] = sphere_verts.shape
+  natom, must_be[3] = positions.shape
+  must_be[natom], = atomic_numbers.shape
+  must_be[natom*nv], must_be[3] = output_verts.shape
+  output_verts[:, :] = (
+      sphere_verts[None, :, :]*ATOM_VALENCE_RADII[atomic_numbers][:, None, None] + positions[:, None, :]
+    ).reshape(natom*nv, 3)
+
+
+
+# ------------------ Define Display subclass AtomsDisplay ------------------
+
+class AtomsDisplay(Display):
+  def start(self, atomic_nums, positions, command_queue):
+    self.command_queue = command_queue
+    self.atomic_nums, self.positions = atomic_nums, positions
+    self.sphere_verts, self.sphere_norms, self.sphere_indxs = make_icosphere(1)
+    self.vertices, self.normals, self.faces, self.colors = create_mesh(
+      self.sphere_verts, self.sphere_norms, self.sphere_indxs,
+      self.atomic_nums, self.positions)
+    # ensure dtype/contiguity
+    self.vertices = np.ascontiguousarray(self.vertices.astype(np.float32))
+    self.normals  = np.ascontiguousarray(self.normals.astype(np.float32))
+    self.faces    = np.ascontiguousarray(self.faces.astype(np.uint32))
+    self.colors   = np.ascontiguousarray(self.colors.astype(np.float32))
+    # setup buffers
+    self._init_buffers()
+  def _bind(self, buff, target=GL_ARRAY_BUFFER):
+    assert buff.flags.c_contiguous, "array to be bound must be contiguous!"
+    handle = glGenBuffers(1)
+    assert handle > 0, "got a handle of 0, indicates context not set correctly, or other error"
+    glBindBuffer(target, handle)
+    glBufferData(target, buff.nbytes, buff, self.usage)
+    glBindBuffer(target, 0) # clean up by making sure no buffer is bound
+    return handle
+  def _update(self, handle, new_data, target=GL_ARRAY_BUFFER):
+    glBindBuffer(target, handle)
+    glBufferData(target, new_data.nbytes, None, self.usage) # orphan old storage
+    glBufferSubData(target, 0, new_data.nbytes, new_data)
+    glBindBuffer(target, 0) # clean up by making sure no buffer is bound
+  def _init_buffers(self):
+    self.usage = GL_DYNAMIC_DRAW
+    self.vbo = self._bind(self.vertices)
+    self.nbo = self._bind(self.normals)
+    self.cbo = self._bind(self.colors)
+    self.ebo = self._bind(self.faces, target=GL_ELEMENT_ARRAY_BUFFER)
+  def set_positions(self, new_positions):
+    self.positions = new_positions
+    update_mesh(self.sphere_verts, self.vertices, self.atomic_nums, self.positions)
+    self._update(self.vbo, self.vertices)
+  def continuous_update(self):
+    while not self.command_queue.empty():
+      command, *args = self.command_queue.get()
+      if command == "update_pos":
+        new_positions, = args
+        self.set_positions(new_positions)
+        self.dirty = True
+      else:
+        print(f"Warning: Ignoring unrecognized command {command}.")
+  def draw(self):    
+    # --- minimal lighting ---
     glEnable(GL_LIGHTING)
-  def _setup_lighting(self):
-    lightZeroPosition = [2*CAM_STEP_BACK_DIST, 0., 2*CAM_STEP_BACK_DIST, 1.]
-    lightZeroColor = 3*[LIGHT_BRIGHTNESS] + [1.0]
-    glLightfv(GL_LIGHT0, GL_POSITION, lightZeroPosition)
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, lightZeroColor)
-    glLightf(GL_LIGHT0, GL_CONSTANT_ATTENUATION, 1.0)
     glEnable(GL_LIGHT0)
-  def _setup_camera(self):
-    glMatrixMode(GL_PROJECTION)
-    gluPerspective(40., 1., 1., 4*CAM_STEP_BACK_DIST)
-    glMatrixMode(GL_MODELVIEW)
-  def _register_callbacks(self):
-    glutMouseFunc(self._get_mouse_click_func())
-    glutKeyboardFunc(self._get_keyboard_func())
-    glutCloseFunc(self._get_cleanup())
-  def _get_display(self):
-    def display():
-      glutSetWindow(self._window_id)
-      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-      glPushMatrix()
-      look_at(*self._camera)
-      for rad, pos, col in zip(self._radii, self._positions, self._colors):
-        draw_sphere(rad, pos, col)
-      glutSwapBuffers()
-      glPopMatrix()
-    return display
-  def _get_keyboard_func(self):
-    active_keys = "exwsdaio"
-    key_axes = [0, 0, 1, 1, 2, 2, 0, 0]
-    key_signs = [1, -1, 1, -1, 1, -1, 0, 0]
-    zoom_factors = [1.]*6 + [0.9, 1/0.9]
-    def keyboard(keycode, x, y):
-      key = active_keys.find(chr(ord(keycode)))
-      if key != -1:
-        eye, center, up = self._camera
-        forward = center - eye
-        right = np.cross(forward, up)
-        forward_mag = np.linalg.norm(forward)
-        unit_directions = [forward/forward_mag,
-          up/np.linalg.norm(up),
-          right/np.linalg.norm(right)]
-        scale = forward_mag/10
-        center += scale*unit_directions[key_axes[key]]*key_signs[key]
-        forward *= zoom_factors[key]
-        eye = center - forward
-        self._camera = eye, center, up
-        self._redisplay()
-    return keyboard
-  def _get_mouse_click_func(self):
-    def mouse_click(btn, state, x, y):
-      if state == GLUT_DOWN:
-        if btn == GLUT_LEFT_BUTTON:
-          self._previous_mouse_position = x, y
-      elif state == GLUT_UP:
-        if btn == GLUT_LEFT_BUTTON:
-          self._drag_rotate(*self._previous_mouse_position, x, y)
-          self._redisplay()
-    return mouse_click
-  def _get_cleanup(self):
-    def cleanup():
-      self._active = False
-      glutSetWindow(self._window_id)
-      glutHideWindow()
-    return cleanup
-  def _drag_rotate(self, x0, y0, x1, y1):
-    dx = x1 - x0
-    dy = y1 - y0
-    rotation_intensity = np.linalg.norm((dx, dy)) / WIDTH
-    eye, center, up = self._camera
-    camera_distance = np.linalg.norm(center-eye)
-    forward = (center-eye)/camera_distance
-    right = np.cross(forward, up)
-    rotation_axis = (up*dx+right*dy)
-    rotation_matrix = create_rotation_matrix(-rotation_intensity,
-      rotation_axis[0], rotation_axis[1], rotation_axis[2])
-    forward = np.dot(rotation_matrix, forward)
-    up = np.dot(rotation_matrix, up)
-    eye = center-forward*camera_distance
-    self._camera = eye, center, up
-  def _redisplay(self):
-    glutSetWindow(self._window_id)
-    glutPostRedisplay()
-  def _pop_events(self):
-    if not self._active: return
-    while not self._events.empty():
-      event_type, event_data = self._events.get()
-      if   event_type == self.EVENT_UPDATE_POS: self._do_update_pos(event_data)
-      elif event_type == self.EVENT_CENTER_POS: self._do_center_pos(event_data)
-      elif event_type == self.EVENT_READ_SCREEN: self._do_read_screen(event_data)
-      else: assert False
-  def _do_center_pos(self, _):
-    eye, center, up = self._camera
-    forward = center - eye
-    center = self._positions.mean(0)
-    eye = center - forward
-    self._camera = eye, center, up
-    self._redisplay()
-  def _do_update_pos(self, newpos):
-    self._positions = newpos
-    self._redisplay()
-  def _do_read_screen(self, _):
-    ans = glReadPixels(0, 0, WIDTH, HEIGHT, GL_RGB, GL_UNSIGNED_BYTE)
-    self._answers.put(ans)
-  def launch(self):
-    self._make_window()
-    self._setup_graphics()
-    self._setup_lighting()
-    self._setup_camera()
-    self._register_callbacks()
-    # main loop:
-    glutDisplayFunc(self._get_display())
-    i = 0
-    while self._active:
-      glutMainLoopEvent()
-      self._pop_events()
-      time.sleep(UPDATE_INTERVAL)
-  def update_pos(self, newpos):
-    assert self._active, "window has already been closed!"
-    self._events.put((self.EVENT_UPDATE_POS, np.copy(newpos)))
-  def center_pos(self):
-    assert self._active, "window has already been closed!"
-    self._events.put((self.EVENT_CENTER_POS, None))
-  def get_current_screen(self):
-    assert self._active, "window has already been closed!"
-    self._events.put((self.EVENT_READ_SCREEN, None))
-    ans = self._answers.get()
-    return np.frombuffer(ans, dtype=np.uint8).reshape(HEIGHT, WIDTH, 3)
+
+    # white-ish headlight, a bit of ambient fill
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, (0.8, 0.8, 0.8, 1.0))
+    glLightfv(GL_LIGHT0, GL_AMBIENT, (0.6, 0.6, 0.6, 1.0))
+
+    # put the light in view space; do this AFTER setting your camera/modelview
+    glLightfv(GL_LIGHT0, GL_POSITION, (0.5, 1.0, 0.5, 0.0))  # directional from camera
+
+    # set material
+    glEnable(GL_COLOR_MATERIAL)
+    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+    glShadeModel(GL_SMOOTH)
+    
+    glEnableClientState(GL_VERTEX_ARRAY)
+    glEnableClientState(GL_NORMAL_ARRAY)
+    glEnableClientState(GL_COLOR_ARRAY)
+    
+    glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+    glVertexPointer(3, GL_FLOAT, 0, ctypes.c_void_p(0))
+    
+    glBindBuffer(GL_ARRAY_BUFFER, self.nbo)
+    glNormalPointer(GL_FLOAT, 0, ctypes.c_void_p(0))
+    
+    glBindBuffer(GL_ARRAY_BUFFER, self.cbo)
+    glColorPointer(3, GL_FLOAT, 0, ctypes.c_void_p(0))
+    
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.ebo)
+    glDrawElements(GL_TRIANGLES, self.faces.size, GL_UNSIGNED_INT, ctypes.c_void_p(0))
+    
+    glBindBuffer(GL_ARRAY_BUFFER, 0) # clean up by making sure no buffer is bound
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0) # clean up by making sure no buffer is bound
+    glDisableClientState(GL_NORMAL_ARRAY) # cleanup
+    glDisableClientState(GL_VERTEX_ARRAY) # cleanup
+    glDisableClientState(GL_COLOR_ARRAY)  # cleanup
 
 
+
+# ------------------ Interface for Interactions ------------------
+
+class AtomsDisplayInterface:
+  def __init__(self, atomic_nums, positions):
+    self.commands = Queue()
+    launch_display_thread(AtomsDisplay, 800, 600, "atoms display",
+      start_args=[atomic_nums, positions, self.commands])
+  def update_pos(self, new_pos):
+    self.commands.put(("update_pos", new_pos.copy())) # sending data to another thread, so making a copy is the polite thing to do
+
+def launch_atom_display(atomic_numbers, positions):
+  disp = AtomsDisplayInterface(atomic_numbers, positions)
+  return disp
+
+
+
+# ------------------ Allow XYZ parsing to test the code ------------------
 
 def parse_xyz(xyz_lines):
   natoms = int(xyz_lines[0])
@@ -339,15 +339,23 @@ def read_xyz(path):
     return parse_xyz(f.readlines())
 
 
-def launch_atom_display(atomic_numbers, positions, **kwargs):
-  disp = AtomDisplay(atomic_numbers, positions, **kwargs)
-  t = Thread(target=(lambda: disp.launch()))
-  t.start()
-  disp.center_pos()
-  return disp
 
+# ------------------ Main ------------------
+def main():
+  import time
+  from sys import argv
+  atomic_nums, positions = read_xyz(argv[1])
+  atomic_nums[:] = 1
+  positions *= 2.
+  
+  display = launch_atom_display(atomic_nums, positions)
+  
+  for i in range(0, 1000):
+    time.sleep(0.03)
+    positions = positions + 0.04*np.random.randn(*positions.shape)
+    display.update_pos(positions)
+    print(i)
 
 if __name__ == "__main__":
-  from sys import argv
-  atomic_numbers, positions = read_xyz(argv[1])
-  display = launch_atom_display(atomic_numbers, positions)
+  main()
+
