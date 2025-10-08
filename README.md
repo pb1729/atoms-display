@@ -19,6 +19,7 @@ Clone the repo and run: `pip install .`
 
 If you want to make changes to the package: `pip install -e .`
 
+You might need to run `sudo apt-get install freeglut3-dev` to get things working.
 
 ## ACKNOWLEDGEMENTS:
 * We thank Rick Muller for the following recipe for using OpenGL in python:
