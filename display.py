@@ -92,7 +92,7 @@ class Display:
   def _set_projection(self):
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity() # this line seems to be necessary for some reason
-    gluPerspective(60.0, self.aspect, 0.1, 100.0)
+    gluPerspective(60.0, self.aspect, 0.1, 1000.0)
     glMatrixMode(GL_MODELVIEW)
   def _draw_all(self):
     # reset canvas

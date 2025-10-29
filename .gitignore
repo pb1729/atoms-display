@@ -2,4 +2,5 @@ atoms_display.egg-info/
 build/
 dist/
 __pycache__/
+test_files/
 
