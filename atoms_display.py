@@ -180,7 +180,7 @@ class AtomsDisplay(Display):
     buffers = self._bind(vertices), self._bind(normals), self._bind(colors), self._bind(faces, target=GL_ELEMENT_ARRAY_BUFFER)
     self.ribbon_buffers.append(buffers)
     # hide the atoms that were part of the ribbon
-    self.atom_scales[ribbon] = 0.0
+    self.atom_scales[ribbon[1:-4]] = 0.0 # drawn ribbon doesn't include all atoms that were provided to compute it
     self.update_atom_vertices()
   def update_ribbons(self):
     for i, ribbon in enumerate(self.ribbons):
