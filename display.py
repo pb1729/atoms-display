@@ -39,6 +39,8 @@ class Display:
     self._set_callbacks()
     glEnable(GL_DEPTH_TEST)
     glClearColor(0.05, 0.07, 0.10, 1.0)
+  def _get_wh(self):
+    return glfw.get_window_size(self.win)
   def _set_callbacks(self):
     def on_resize(window, w, h):
       h = max(1, h)

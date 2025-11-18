@@ -202,6 +202,13 @@ class AtomsDisplay(Display):
         ribbon, = args
         self.add_ribbon(ribbon)
         self.dirty = True
+      elif command == "get_current_screen":
+        ans_queue, = args
+        width, height = self._get_wh()
+        glReadBuffer(GL_BACK)
+        pixels = glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE)
+        ans_queue.put((width, height, pixels))
+        self.dirty = True # request a redraw
       else:
         print(f"Warning: Ignoring unrecognized command {command}.")
     if positions_changed: # group together all position change updates into one
@@ -270,6 +277,11 @@ class AtomsDisplayInterface:
       self.commands.put(("add_ribbon", ribbon))
   def update_pos(self, new_pos):
     self.commands.put(("update_pos", new_pos.copy())) # sending data to another thread, so making a copy is the polite thing to do
+  def get_current_screen(self):
+    ans_queue = Queue()
+    self.commands.put(("get_current_screen", ans_queue))
+    width, height, pixels = ans_queue.get()
+    return np.frombuffer(pixels, dtype=np.uint8).reshape(height, width, 3)
 
 def launch_atom_display(atomic_numbers, positions, ribbons=None):
   disp = AtomsDisplayInterface(atomic_numbers, positions, ribbons)
@@ -298,11 +310,12 @@ def main():
   positions -= positions.mean(0) # center the initial positioning of everything
   display = launch_atom_display(atomic_nums, positions, ribbons)
   
-  for i in range(0, 1000):
-    time.sleep(10.0)
-    #positions = positions + 0.5*np.random.randn(*positions.shape)
+  while True:
+    time.sleep(0.5)
+    #curr_screen = display.get_current_screen()
+    #positions = positions + 0.05*np.random.randn(*positions.shape)
     #display.update_pos(positions) # test position updating
-    print(i)
+    #print(i)
 
 if __name__ == "__main__":
   main()
