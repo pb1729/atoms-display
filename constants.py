@@ -63,18 +63,15 @@ ATOM_VALENCE_RADII = np.array([0,  # No element 0
 # ------------------ Ribbon Drawing Parameters ------------------
 
 SIDEVEC_RAD = 2.5 # [A]
-NORMVEC_RAD = 1.0 # [A]
 RIBBON_COLOR = 0.25*(2*ATOM_COLORS[6] + ATOM_COLORS[7] + ATOM_COLORS[8])
 
 
 # Apply Chonk Factor
 
 SIDEVEC_RAD *= CHONK_FACTOR
-NORMVEC_RAD *= CHONK_FACTOR
 
 ATOM_VALENCE_RADII *= CHONK_FACTOR
 if TINY_HYDROGENS:
   ATOM_VALENCE_RADII[1] *= TINY_HYDROGEN_SCALE
-
 
 

@@ -140,7 +140,7 @@ class AtomsDisplay(Display):
     self.normals  = np.ascontiguousarray(self.normals.astype(np.float32))
     self.faces    = np.ascontiguousarray(self.faces.astype(np.uint32))
     self.colors   = np.ascontiguousarray(self.colors.astype(np.float32))
-    # setup list of ribbon meshes tuples of (vertices, normals, colors, faces)
+    # setup list of ribbon meshes
     self.ribbons = []
     self.ribbon_meshes = []
     self.ribbon_buffers = []
@@ -253,7 +253,7 @@ class AtomsDisplay(Display):
     self._draw_mesh(self.vbo, self.nbo, self.cbo, self.ebo, self.faces.size)
     # draw ribbons:
     for mesh, buffers in zip(self.ribbon_meshes, self.ribbon_buffers):
-      self._draw_mesh(*buffers, mesh[3].size)
+      self._draw_mesh(*buffers, mesh.faces.size)
     
     glDisableClientState(GL_VERTEX_ARRAY) # cleanup
     glDisableClientState(GL_NORMAL_ARRAY) # cleanup
@@ -319,4 +319,3 @@ def main():
 
 if __name__ == "__main__":
   main()
-

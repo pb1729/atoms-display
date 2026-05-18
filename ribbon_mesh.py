@@ -1,7 +1,32 @@
+from dataclasses import dataclass
+
 import numpy as np
 
 from quaternion import Quat
-from constants import RIBBON_COLOR, SIDEVEC_RAD, NORMVEC_RAD
+from constants import RIBBON_COLOR, SIDEVEC_RAD
+
+
+ATOMS_PER_RESIDUE = 4
+BACKBONE_ATOMS_PER_RESIDUE = 3
+ATOM_N = 0
+ATOM_CA = 1
+ATOM_C = 2
+ATOM_O = 3
+FRAME_TARGET_SMOOTHING_PASSES = 1
+
+
+@dataclass
+class Mesh:
+  vertices: np.ndarray
+  normals: np.ndarray
+  colors: np.ndarray
+  faces: np.ndarray
+
+  def __iter__(self):
+    return iter((self.vertices, self.normals, self.colors, self.faces))
+
+  def __getitem__(self, idx):
+    return (self.vertices, self.normals, self.colors, self.faces)[idx]
 
 
 def catmull_rom(points, res:int=10):
@@ -36,71 +61,102 @@ def normalize(v):
   """ v: (..., 3) """
   return v/np.linalg.norm(v, axis=-1, keepdims=True)
 
+def reject_from(v, axis):
+  """Remove the component of v parallel to axis."""
+  axis = normalize(axis)
+  return v - axis*np.sum(v*axis, axis=-1, keepdims=True)
+
 def slerp(q:Quat, t:float):
   """ Spherical linear quarternion interpolation between 1 and q (or -q). """
   if q.w < 0: q = -q # choose the shorter path
-  theta = np.arccos(q.w)
+  theta = np.arccos(np.clip(q.w, -1.0, 1.0))
+  sin_theta = np.sin(theta)
+  if abs(sin_theta) < 1e-8:
+    return Quat()
   q_1 = Quat()
-  return q_1.scale(np.sin((1. - t)*theta)/np.sin(theta)) + q.scale(np.sin(t*theta)/np.sin(theta))
+  return q_1.scale(np.sin((1. - t)*theta)/sin_theta) + q.scale(np.sin(t*theta)/sin_theta)
 
-def get_tangent_frames(target_indices, sidevec_targets, tangents):
+def align_vector_signs(vectors):
+  """Flip vectors as needed so adjacent directions stay on the same side."""
+  aligned = vectors.copy()
+  for i in range(1, aligned.shape[0]):
+    if np.dot(aligned[i - 1], aligned[i]) < 0:
+      aligned[i] *= -1
+  return aligned
+
+def smooth_directions(directions, passes:int=1):
+  """Lightweight sign-aware smoothing for sparse frame target directions."""
+  directions = normalize(align_vector_signs(directions))
+  for _ in range(passes):
+    padded = np.concatenate([directions[:1], directions, directions[-1:]], axis=0)
+    directions = normalize(0.25*padded[:-2] + 0.5*padded[1:-1] + 0.25*padded[2:])
+    directions = align_vector_signs(directions)
+  return directions
+
+def get_tangent_frames(target_indices, width_dir_targets, tangents):
   """ target_indices: (M) --> ints, should be sorted in increasing order!
-      sidevec_targets: (M, 3)
+      width_dir_targets: (M, 3)
       tangents: (N, 3)
-      sidevecs, normvecs: (N, 3) """
+      width_dirs, face_normals: (N, 3) """
   N = tangents.shape[0]
   M, = target_indices.shape
   assert target_indices[0] == 0 and target_indices[-1] == N - 1, "must have targets at the endpoints of the range"
   tangents = normalize(tangents)
-  sidevec_targets = normalize(sidevec_targets)
+  width_dir_targets = normalize(width_dir_targets)
   # initialize answer memory
-  sidevecs = np.empty((N, 3))
-  normvecs = np.empty((N, 3))
+  width_dirs = np.empty((N, 3))
+  face_normals = np.empty((N, 3))
   # prepare for start of loop
-  sidevecs[0] = sidevec_targets[target_indices[0]]
-  normvecs[0] = np.cross(sidevecs[0], tangents[0])
+  width_dirs[0] = width_dir_targets[target_indices[0]]
+  face_normals[0] = np.cross(width_dirs[0], tangents[0])
   # loop through remaining M indices
   for i in range(M - 1):
     idx_start, idx_end = target_indices[i], target_indices[i + 1]
     # choose the closer vector to rotate to
-    if np.dot(sidevecs[idx_start], sidevec_targets[i + 1]) > 0:
-      next_sidevec = sidevec_targets[i + 1]
+    if np.dot(width_dirs[idx_start], width_dir_targets[i + 1]) > 0:
+      next_width_dir = width_dir_targets[i + 1]
     else:
-      next_sidevec = -sidevec_targets[i + 1]
+      next_width_dir = -width_dir_targets[i + 1]
     curr_tangent = tangents[idx_start]
     next_tangent = tangents[idx_end]
-    q_rel = Quat.from_frames(curr_tangent, sidevecs[idx_start], next_tangent, next_sidevec)
+    q_rel = Quat.from_frames(curr_tangent, width_dirs[idx_start], next_tangent, next_width_dir)
     j = 1 + np.arange(idx_end - idx_start)
     t = j / (idx_end - idx_start)
     q = slerp(q_rel, t)
-    sidevecs[idx_start + j] = q.rotate_vec3(sidevecs[idx_start])
-    normvecs[idx_start + j] = np.cross(sidevecs[idx_start + j], tangents[idx_start + j])
-  return sidevecs, normvecs
+    width_dirs[idx_start + j] = q.rotate_vec3(width_dirs[idx_start])
+    face_normals[idx_start + j] = np.cross(width_dirs[idx_start + j], tangents[idx_start + j])
+  return width_dirs, face_normals
 
-def frames_to_loop(sidevecs, normvecs, res:int=20):
-  """ sidevecs, normvecs: (N, 3)
-      pos, norm: (N, res, 3) """
-  theta = np.arange(res) * (2.*np.pi/res)
-  z = np.stack([np.cos(theta), np.sin(theta)], axis=-1) # (res, 2)
-  U = np.stack([SIDEVEC_RAD*sidevecs, NORMVEC_RAD*normvecs], axis=-1) # (N, 3, 2)
-  U_pinv = U @ np.linalg.inv(U.mT @ U)
-  pos = (U[:, None, :, :]*z[:, None, :]).sum(-1)
-  norm = (U_pinv[:, None, :, :]*z[:, None, :]).sum(-1)
-  return pos, normalize(norm)
+def frames_to_ribbon(width_dirs, face_normals):
+  """ width_dirs, face_normals: (N, 3)
+      pos, norm: (N, 4, 3)
 
-def tube_faces(N:int, res_loop:int):
-  # coding trick here is to describe mesh indices as polynomials in r=res_loop
-  # 0+0r---0+1r
-  #  |   /  |
-  # 1+0r---1+1r
-  base_mesh_1 = np.array([0, 1, 0, 0, 1, 1])
-  base_mesh_r = np.array([0, 0, 1, 1, 0, 1])
-  ring_mesh_1 = (base_mesh_1[None, :] + np.arange(res_loop)[:, None]) % res_loop
-  ring_mesh_r = base_mesh_r[None, :]
-  tube_mesh_1 = ring_mesh_1[None, :, :]
-  tube_mesh_r = ring_mesh_r[None, :, :] + np.arange(N - 1)[:, None, None]
-  ans = res_loop*tube_mesh_r + tube_mesh_1
-  return ans.reshape(-1)
+      The four vertices per frame are front-left, front-right, back-left,
+      back-right. Back vertices duplicate the positions with flipped normals
+      so lighting works when the flat ribbon is viewed from either side.
+  """
+  offsets = np.stack([-SIDEVEC_RAD*width_dirs, SIDEVEC_RAD*width_dirs], axis=1)
+  vertices = np.concatenate([offsets, offsets], axis=1)
+  normals = np.concatenate([
+    np.repeat(face_normals[:, None, :], 2, axis=1),
+    np.repeat(-face_normals[:, None, :], 2, axis=1),
+  ], axis=1)
+  return vertices, normalize(normals)
+
+def ribbon_faces(N:int):
+  """Return triangle indices for an alternating flat ribbon strip."""
+  frame_starts = 4*np.arange(N - 1)[:, None]
+  even_segments = (np.arange(N - 1)[:, None] % 2) == 0
+
+  front_even = np.array([0, 1, 4, 1, 5, 4])
+  front_odd = np.array([0, 1, 5, 0, 5, 4])
+  front = np.where(even_segments, front_even, front_odd) + frame_starts
+
+  back_even = np.array([2, 6, 3, 3, 6, 7])
+  back_odd = np.array([2, 7, 3, 2, 6, 7])
+  back = np.where(even_segments, back_even, back_odd) + frame_starts
+
+  return np.concatenate([front, back], axis=1).reshape(-1)
 
 def interleave(a, b):
   """ a, b: (N, ...)
@@ -108,50 +164,74 @@ def interleave(a, b):
   return np.stack([a, b], axis=1).reshape(2*a.shape[0], *a.shape[1:])
 
 
-def ribbon_mesh(ribbon_positions, res:int=8, res_loop:int=12):
-  """ ribbon_positions: (4*residues, 3)
-      residue is unit of 4 atoms: N, CA, C, O """
-  # Layout is the following:
-  # N CA C N CA C N CA C N CA C N CA C
-  #      ---    ---    ---    ---
-  # where `---` shows planes with normal vec defined
-  residue_layout = ribbon_positions.reshape(-1, 4, 3)
-  backbone_positions = residue_layout[:, :-1, :].reshape(-1, 3) # strip oxygens from backbone
-  # compute some displacement vectors
-  vecs_N_to_C = residue_layout[:-1, 2] - residue_layout[1:, 0]
-  vecs_N_to_CA = residue_layout[1:, 1] - residue_layout[1:, 0]
-  vecs_C_to_O  = residue_layout[1:, 3] - residue_layout[1:, 2]
-  vecs_C_to_CA = residue_layout[1:, 1] - residue_layout[1:, 2]
-  # compute backbone spline
-  spline, tangents = catmull_rom(backbone_positions, res=res)
-  # compute normal vectors
-  normvec_N = np.cross(vecs_N_to_C, vecs_N_to_CA)
-  normvec_C = np.cross(vecs_C_to_CA, vecs_C_to_O)
-  # compute target indices and target side vectors
-  target_indices_N = res*(2 + np.arange(normvec_N.shape[0])*3) # TODO: these offsets seem to work, but I don't really know why
-  target_indices_C = res*(1 + np.arange(normvec_C.shape[0])*3)
-  sidevec_targets_N = np.cross(normvec_N, tangents[target_indices_N])
-  sidevec_targets_C = np.cross(normvec_C, tangents[target_indices_C])
-  target_indices = interleave(target_indices_C, target_indices_N)
-  sidevec_targets = interleave(sidevec_targets_C, sidevec_targets_N)
-  # trim down spline and tangents to match target indices
+def residue_layout(ribbon_positions):
+  """Return residue atom positions shaped as (residues, N/CA/C/O, xyz)."""
+  return ribbon_positions.reshape(-1, ATOMS_PER_RESIDUE, 3)
+
+def backbone_from_residues(residues):
+  """Return flattened N, CA, C backbone positions."""
+  return residues[:, :BACKBONE_ATOMS_PER_RESIDUE, :].reshape(-1, 3)
+
+def peptide_plane_normals(residues):
+  """Return peptide-plane normal estimates near C and N anchors."""
+  c_to_next_n = residues[:-1, ATOM_C] - residues[1:, ATOM_N]
+  n_to_ca = residues[1:, ATOM_CA] - residues[1:, ATOM_N]
+  c_to_o = residues[1:, ATOM_O] - residues[1:, ATOM_C]
+  c_to_ca = residues[1:, ATOM_CA] - residues[1:, ATOM_C]
+  normal_at_n = np.cross(c_to_next_n, n_to_ca)
+  normal_at_c = np.cross(c_to_ca, c_to_o)
+  return normal_at_c, normal_at_n
+
+def backbone_spline_point_index(residue_indices, atom_offset, res):
+  """Index into the sampled spline at a backbone atom anchor."""
+  return res*(BACKBONE_ATOMS_PER_RESIDUE*residue_indices + atom_offset)
+
+def frame_targets(residues, tangents, res):
+  """Return sparse spline indices and ribbon-width direction targets."""
+  normal_at_c, normal_at_n = peptide_plane_normals(residues)
+  # Each peptide plane spans residue i to i+1, but the historical ribbon
+  # anchors it at CA/C samples of residue i on the flattened N,CA,C backbone.
+  peptide_indices = np.arange(normal_at_c.shape[0])
+  target_indices_c = backbone_spline_point_index(peptide_indices, ATOM_CA, res)
+  target_indices_n = backbone_spline_point_index(peptide_indices, ATOM_C, res)
+  width_targets_c = np.cross(normal_at_c, tangents[target_indices_c])
+  width_targets_n = np.cross(normal_at_n, tangents[target_indices_n])
+  target_indices = interleave(target_indices_c, target_indices_n)
+  width_targets = smooth_directions(
+    interleave(width_targets_c, width_targets_n),
+    passes=FRAME_TARGET_SMOOTHING_PASSES)
+  width_targets = normalize(reject_from(width_targets, tangents[target_indices]))
+  return target_indices, width_targets
+
+def trim_to_targets(centers, tangents, target_indices):
+  """Trim spline arrays so frame interpolation starts and ends at targets."""
   idx_start, idx_end = target_indices.min(), target_indices.max() + 1
-  target_indices -= idx_start
-  spline, tangents = spline[idx_start:idx_end], tangents[idx_start:idx_end]
-  # get frames and loops
-  sidevecs, normvecs = get_tangent_frames(target_indices, sidevec_targets, tangents)
-  vertices, normals = frames_to_loop(sidevecs, normvecs, res=res_loop)
-  vertices += spline[:, None, :]
-  # okay, time to make the outputs!
-  faces = tube_faces(vertices.shape[0], vertices.shape[1])
-  vertices = vertices.reshape(-1, 3)
-  normals  = normals.reshape(-1, 3)
+  return centers[idx_start:idx_end], tangents[idx_start:idx_end], target_indices - idx_start
+
+def build_ribbon_mesh(centers, normals, faces):
+  vertices = centers.reshape(-1, 3)
+  normals = normals.reshape(-1, 3)
   colors = np.ones_like(vertices)*RIBBON_COLOR
-  return (
+  return Mesh(
     np.ascontiguousarray(vertices.astype(np.float32)),
     np.ascontiguousarray(normals.astype(np.float32)),
     np.ascontiguousarray(colors.astype(np.float32)),
-    np.ascontiguousarray(faces.astype(np.int32)))
+    np.ascontiguousarray(faces.astype(np.uint32)))
+
+def ribbon_mesh(ribbon_positions, res:int=8, res_loop:int=12):
+  """ ribbon_positions: (4*residues, 3)
+      residue is unit of 4 atoms: N, CA, C, O """
+  del res_loop # kept for API compatibility with the old tube mesh
+  if ribbon_positions.shape[0] < 2*ATOMS_PER_RESIDUE:
+    raise ValueError("ribbon mesh requires at least two residues")
+  residues = residue_layout(ribbon_positions)
+  centers, tangents = catmull_rom(backbone_from_residues(residues), res=res)
+  target_indices, width_targets = frame_targets(residues, tangents, res)
+  centers, tangents, target_indices = trim_to_targets(centers, tangents, target_indices)
+  width_dirs, face_normals = get_tangent_frames(target_indices, width_targets, tangents)
+  vertices, normals = frames_to_ribbon(width_dirs, face_normals)
+  vertices += centers[:, None, :]
+  return build_ribbon_mesh(vertices, normals, ribbon_faces(vertices.shape[0]))
 
 
 
@@ -166,5 +246,3 @@ if __name__ == "__main__":
   plt.plot(tangents[:, 0], tangents[:, 1], marker=".", alpha=0.5)
   plt.plot(tangents_compare[:, 0], tangents_compare[:, 1], marker=".", alpha=0.5)
   plt.show()
-
-
