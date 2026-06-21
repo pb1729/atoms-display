@@ -144,6 +144,8 @@ class AtomsDisplay(Display):
     self.ribbons = []
     self.ribbon_meshes = []
     self.ribbon_buffers = []
+    self.line_sets = []
+    self.line_buffers = []
     # setup buffers
     self._init_buffers()
   def _bind(self, buff, target=GL_ARRAY_BUFFER):
@@ -190,6 +192,13 @@ class AtomsDisplay(Display):
       self._update(nbo, normals)
       self._update(cbo, colors)
       self._update(ebo, faces, target=GL_ELEMENT_ARRAY_BUFFER)
+  def add_lines(self, vertices, colors):
+    vertices = np.ascontiguousarray(vertices.astype(np.float32))
+    colors = np.ascontiguousarray(colors.astype(np.float32))
+    nverts, must_be[3] = vertices.shape
+    must_be[nverts], must_be[3] = colors.shape
+    self.line_sets.append((vertices, colors))
+    self.line_buffers.append((self._bind(vertices), self._bind(colors)))
   def continuous_update(self):
     positions_changed = False
     while not self.command_queue.empty():
@@ -201,6 +210,10 @@ class AtomsDisplay(Display):
       elif command == "add_ribbon":
         ribbon, = args
         self.add_ribbon(ribbon)
+        self.dirty = True
+      elif command == "add_lines":
+        vertices, colors = args
+        self.add_lines(vertices, colors)
         self.dirty = True
       elif command == "get_current_screen":
         ans_queue, = args
@@ -228,6 +241,16 @@ class AtomsDisplay(Display):
     
     glBindBuffer(GL_ARRAY_BUFFER, 0) # clean up by making sure no buffer is bound
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0) # clean up by making sure no buffer is bound
+  def _draw_lines(self, vbo, cbo, nverts:int):
+    glBindBuffer(GL_ARRAY_BUFFER, vbo)
+    glVertexPointer(3, GL_FLOAT, 0, ctypes.c_void_p(0))
+
+    glBindBuffer(GL_ARRAY_BUFFER, cbo)
+    glColorPointer(3, GL_FLOAT, 0, ctypes.c_void_p(0))
+
+    glDrawArrays(GL_LINES, 0, nverts)
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0) # clean up by making sure no buffer is bound
   def draw(self):    
     # --- minimal lighting ---
     glEnable(GL_LIGHTING)
@@ -254,9 +277,14 @@ class AtomsDisplay(Display):
     # draw ribbons:
     for mesh, buffers in zip(self.ribbon_meshes, self.ribbon_buffers):
       self._draw_mesh(*buffers, mesh.faces.size)
+
+    glDisable(GL_LIGHTING)
+    glLineWidth(1.0)
+    glDisableClientState(GL_NORMAL_ARRAY)
+    for (vertices, _colors), buffers in zip(self.line_sets, self.line_buffers):
+      self._draw_lines(*buffers, vertices.shape[0])
     
     glDisableClientState(GL_VERTEX_ARRAY) # cleanup
-    glDisableClientState(GL_NORMAL_ARRAY) # cleanup
     glDisableClientState(GL_COLOR_ARRAY)  # cleanup
 
 
@@ -277,6 +305,8 @@ class AtomsDisplayInterface:
       self.commands.put(("add_ribbon", ribbon))
   def update_pos(self, new_pos):
     self.commands.put(("update_pos", new_pos.copy())) # sending data to another thread, so making a copy is the polite thing to do
+  def add_lines(self, vertices, colors):
+    self.commands.put(("add_lines", vertices.copy(), colors.copy()))
   def get_current_screen(self):
     ans_queue = Queue()
     self.commands.put(("get_current_screen", ans_queue))
